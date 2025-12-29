@@ -9,8 +9,8 @@ extension UserDefaults {
 		return Value.toValue(anyObject)
 	}
 
-	 func _set<Value: Defaults.Serializable>(_ key: String, to value: Value) {
-		if (value as? _DefaultsOptionalProtocol)?._defaults_isNil == true {
+	func _set<Value: Defaults.Serializable>(_ key: String, to value: Value) {
+		if (value as? (any _DefaultsOptionalProtocol))?._defaults_isNil == true {
 			removeObject(forKey: key)
 			return
 		}

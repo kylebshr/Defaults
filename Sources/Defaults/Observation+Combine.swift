@@ -7,16 +7,16 @@ extension Defaults {
 	*/
 	final class DefaultsSubscription<SubscriberType: Subscriber>: Subscription where SubscriberType.Input == BaseChange {
 		private var subscriber: SubscriberType?
-		private var observation: UserDefaultsKeyObservation?
+		private var observation: DefaultsObservationWithLifeTime?
 		private let options: ObservationOptions
 
 		init(subscriber: SubscriberType, suite: UserDefaults, key: String, options: ObservationOptions) {
 			self.subscriber = subscriber
 			self.options = options
-			self.observation = UserDefaultsKeyObservation(
+			self.observation = DefaultsObservationWithLifeTime(
 				object: suite,
 				key: key,
-				callback: observationCallback(_:)
+				observationCallback
 			)
 		}
 
@@ -33,7 +33,7 @@ extension Defaults {
 			observation?.start(options: options)
 		}
 
-		private func observationCallback(_ change: BaseChange) {
+		private func observationCallback(_: SuiteKeyPair, change: BaseChange) {
 			_ = subscriber?.receive(change)
 		}
 	}
@@ -84,7 +84,7 @@ extension Defaults {
 	}
 	```
 
-	- Warning: This method exists for backwards compatibility and will be deprecated sometime in the future. Use ``Defaults/updates(_:initial:)-9eh8`` instead.
+	- Warning: This method exists for backwards compatibility and will be deprecated sometime in the future. Use ``Defaults/updates(_:initial:)-88orv`` instead.
 	*/
 	public static func publisher<Value: Serializable>(
 		_ key: Key<Value>,
@@ -99,7 +99,7 @@ extension Defaults {
 	/**
 	Publisher for multiple `Key<T>` observation, but without specific information about changes.
 
-	- Warning: This method exists for backwards compatibility and will be deprecated sometime in the future. Use ``Defaults/updates(_:initial:)-9eh8`` instead.
+	- Warning: This method exists for backwards compatibility and will be deprecated sometime in the future. Use ``Defaults/updates(_:initial:)-88orv`` instead.
 	*/
 	public static func publisher(
 		keys: [_AnyKey],
@@ -122,7 +122,7 @@ extension Defaults {
 	/**
 	Publisher for multiple `Key<T>` observation, but without specific information about changes.
 
-	 - Warning: This method exists for backwards compatibility and will be deprecated sometime in the future. Use ``Defaults/updates(_:initial:)-9eh8`` instead.
+	- Warning: This method exists for backwards compatibility and will be deprecated sometime in the future. Use ``Defaults/updates(_:initial:)-88orv`` instead.
 	*/
 	public static func publisher(
 		keys: _AnyKey...,

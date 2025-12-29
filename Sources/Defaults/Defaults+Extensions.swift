@@ -145,6 +145,9 @@ extension Color: Defaults.Serializable {
 	public static let bridge = Defaults.ColorBridge()
 }
 
+@available(macOS 14.0, iOS 17.0, tvOS 17.0, watchOS 10.0, visionOS 1.0, *)
+extension Color.Resolved: Defaults.Serializable {}
+
 extension Range: Defaults.RangeSerializable where Bound: Defaults.Serializable {
 	public static var bridge: Defaults.RangeBridge<Range> { Defaults.RangeBridge() }
 }
@@ -164,3 +167,25 @@ extension NSColor: Defaults.Serializable {}
 */
 extension UIColor: Defaults.Serializable {}
 #endif
+
+#if os(macOS)
+extension NSFontDescriptor: Defaults.Serializable {}
+#else
+extension UIFontDescriptor: Defaults.Serializable {}
+#endif
+
+extension NSUbiquitousKeyValueStore: DefaultsKeyValueStore {}
+extension UserDefaults: DefaultsKeyValueStore {}
+
+extension DefaultsLockProtocol {
+	@discardableResult
+	func with<R, E>(_ body: @Sendable () throws(E) -> R) throws(E) -> R where R: Sendable {
+		lock()
+
+		defer {
+			unlock()
+		}
+
+		return try body()
+	}
+}

@@ -32,19 +32,19 @@ extension Defaults {
 			task?.cancel()
 		}
 
-		func observe() {
+		private func observe() {
 			// We only use this on the latest OSes (as of adding this) since the backdeploy library has a lot of bugs.
-			if #available(macOS 13, iOS 16, tvOS 16, watchOS 9, *) {
+			if #available(macOS 13, iOS 16, tvOS 16, watchOS 9, visionOS 1.0, *) {
 				task?.cancel()
 
 				// The `@MainActor` is important as the `.send()` method doesn't inherit the `@MainActor` from the class.
 				task = .detached(priority: .userInitiated) { @MainActor [weak self, key] in
-					for await _ in Defaults.updates(key) {
+					for await _ in Defaults.updates(key, initial: false) {
 						guard let self else {
 							return
 						}
 
-						self.objectWillChange.send()
+						objectWillChange.send()
 					}
 				}
 			} else {
@@ -75,8 +75,10 @@ Access stored values from SwiftUI.
 
 This is similar to `@AppStorage` but it accepts a ``Defaults/Key`` and many more types.
 */
+@MainActor
 @propertyWrapper
-public struct Default<Value: Defaults.Serializable>: DynamicProperty {
+public struct Default<Value: Defaults.Serializable>: @preconcurrency DynamicProperty {
+	@_documentation(visibility: private)
 	public typealias Publisher = AnyPublisher<Defaults.KeyChange<Value>, Never>
 
 	private let key: Defaults.Key<Value>
@@ -130,6 +132,7 @@ public struct Default<Value: Defaults.Serializable>: DynamicProperty {
 	*/
 	public var publisher: Publisher { Defaults.publisher(key) }
 
+	@_documentation(visibility: private)
 	public mutating func update() {
 		observable.key = key
 		_observable.update()
@@ -202,28 +205,56 @@ extension Defaults {
 		@ViewStorage private var onChange: ((Bool) -> Void)?
 
 		private let label: () -> Label
+		private let inverted: Bool
 
-		// Intentionally using `@ObservedObjected` over `@StateObject` so that the key can be dynamically changed.
+		// Intentionally using `@ObservedObject` over `@StateObject` so that the key can be dynamically changed.
 		@ObservedObject private var observable: Defaults.Observable<Bool>
 
-		public init(key: Defaults.Key<Bool>, @ViewBuilder label: @escaping () -> Label) {
+		public init(
+			key: Defaults.Key<Bool>,
+			inverted: Bool = false,
+			@ViewBuilder label: @escaping () -> Label
+		) {
+			self.inverted = inverted
 			self.label = label
 			self.observable = .init(key)
 		}
 
+		@_documentation(visibility: private)
 		public var body: some View {
-			SwiftUI.Toggle(isOn: $observable.value, label: label)
-				.onChange(of: observable.value) {
-					onChange?($0)
-				}
+			SwiftUI.Toggle(
+				isOn: inverted ? $observable.value.toggled() : $observable.value,
+				label: label
+			)
+			.onChange(of: observable.value) {
+				onChange?(inverted ? !$0 : $0)
+			}
 		}
 	}
 }
 
 extension Defaults.Toggle<Text> {
-	public init(_ title: some StringProtocol, key: Defaults.Key<Bool>) {
-		self.label = { Text(title) }
-		self.observable = .init(key)
+	public init(
+		_ title: some StringProtocol,
+		key: Defaults.Key<Bool>,
+		inverted: Bool = false
+	) {
+		self.init(key: key, inverted: inverted) {
+			Text(title)
+		}
+	}
+}
+
+extension Defaults.Toggle<Label<Text, Image>> {
+	public init(
+		_ title: some StringProtocol,
+		systemImage: String,
+		key: Defaults.Key<Bool>,
+		inverted: Bool = false
+	) {
+		self.init(key: key, inverted: inverted) {
+			Label(title, systemImage: systemImage)
+		}
 	}
 }
 
@@ -237,8 +268,10 @@ extension Defaults.Toggle {
 	}
 }
 
+@MainActor
 @propertyWrapper
 private struct ViewStorage<Value>: DynamicProperty {
+	@MainActor
 	private final class ValueBox {
 		var value: Value
 
@@ -258,5 +291,14 @@ private struct ViewStorage<Value>: DynamicProperty {
 
 	init(wrappedValue value: @autoclosure @escaping () -> Value) {
 		self._valueBox = .init(wrappedValue: ValueBox(value()))
+	}
+}
+
+extension Binding<Bool> {
+	func toggled() -> Self {
+		.init(
+			get: { !wrappedValue },
+			set: { wrappedValue = !$0 }
+		)
 	}
 }

@@ -1,8 +1,8 @@
 import Foundation
-#if DEBUG
-#if canImport(OSLog)
+import Combine
+import os
+#if DEBUG && canImport(OSLog)
 import OSLog
-#endif
 #endif
 
 
@@ -165,6 +165,19 @@ extension Collection {
 	}
 }
 
+extension Equatable {
+	func isEqual(_ rhs: some Equatable) -> Bool {
+		guard
+			let rhs = rhs as? Self,
+			rhs == self
+		else {
+			return false
+		}
+
+		return true
+	}
+}
+
 extension Defaults {
 	@usableFromInline
 	static func isValidKeyPath(name: String) -> Bool {
@@ -191,7 +204,7 @@ extension Defaults.Serializable {
 		if
 			T.isNativelySupportedType,
 			let anyObject = anyObject as? T
-		{
+		{ // swiftlint:disable:this opening_brace
 			return anyObject
 		}
 
@@ -217,7 +230,7 @@ extension Defaults.Serializable {
 	*/
 	@usableFromInline
 	static func toSerializable<T: Defaults.Serializable>(_ value: T) -> Any? {
-		if T.isNativelySupportedType {
+		guard !T.isNativelySupportedType else {
 			return value
 		}
 
@@ -231,6 +244,180 @@ extension Defaults.Serializable {
 		}
 
 		return toSerializable(next)
+	}
+}
+
+// TODO: Remove this in favor of `MutexLock` when targeting Swift 6.
+// swiftlint:disable:next final_class
+class Lock: DefaultsLockProtocol {
+	final class UnfairLock: Lock {
+		private let _lock: os_unfair_lock_t
+
+		override init() {
+			self._lock = .allocate(capacity: 1)
+			_lock.initialize(to: os_unfair_lock())
+		}
+
+		override func lock() {
+			os_unfair_lock_lock(_lock)
+		}
+
+		override func unlock() {
+			os_unfair_lock_unlock(_lock)
+		}
+	}
+
+	@available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, visionOS 1.0, *)
+	final class AllocatedUnfairLock: Lock {
+		private let _lock = OSAllocatedUnfairLock()
+
+		override init() {
+			super.init()
+		}
+
+		override func lock() {
+			_lock.lock()
+		}
+
+		override func unlock() {
+			_lock.unlock()
+		}
+	}
+
+	static func make() -> Self {
+		guard #available(macOS 13.0, iOS 16.0, tvOS 16.0, watchOS 9.0, visionOS 1.0, *) else {
+			return UnfairLock() as! Self
+		}
+
+		return AllocatedUnfairLock() as! Self
+	}
+
+	private init() {}
+	func lock() {}
+	func unlock() {}
+}
+
+/**
+A queue for executing asynchronous tasks in order.
+
+```swift
+actor Counter {
+	var count = 0
+
+	func increase() {
+		count += 1
+	}
+}
+let counter = Counter()
+let queue = TaskQueue(priority: .background)
+queue.async {
+	print(await counter.count) //=> 0
+}
+queue.async {
+	await counter.increase()
+}
+queue.async {
+	print(await counter.count) //=> 1
+}
+```
+*/
+final class TaskQueue {
+	typealias AsyncTask = @Sendable () async -> Void
+	private var queueContinuation: AsyncStream<AsyncTask>.Continuation?
+	private let lock: Lock = .make()
+
+	init(priority: TaskPriority? = nil) {
+        let (taskStream, queueContinuation) = AsyncStream<AsyncTask>.makeStream()
+		self.queueContinuation = queueContinuation
+
+		Task.detached(priority: priority) {
+			for await task in taskStream {
+				await task()
+			}
+		}
+	}
+
+	deinit {
+		queueContinuation?.finish()
+	}
+
+	/**
+	Queue a new asynchronous task.
+	*/
+	func async(_ task: @escaping AsyncTask) {
+		lock.with {
+			queueContinuation?.yield(task)
+		}
+	}
+
+	/**
+	Wait until previous tasks finish.
+
+	```swift
+	Task {
+		queue.async {
+			print("1")
+		}
+		queue.async {
+			print("2")
+		}
+		await queue.flush()
+		//=> 1
+		//=> 2
+	}
+	```
+	*/
+	func flush() async {
+		await withCheckedContinuation { continuation in
+			lock.with {
+				_ = queueContinuation?.yield {
+					continuation.resume()
+				}
+			}
+		}
+	}
+}
+
+// TODO: Replace with Swift 6 native Atomics support: https://github.com/apple/swift-evolution/blob/main/proposals/0258-property-wrappers.md?rgh-link-date=2024-03-29T14%3A14%3A00Z#changes-from-the-accepted-proposal
+@propertyWrapper
+final class _DefaultsAtomic<Value> {
+	private let lock: Lock = .make()
+	private var _value: Value
+
+	var wrappedValue: Value {
+		get {
+			withValue { $0 }
+		}
+		set {
+			swap(newValue)
+		}
+	}
+
+	init(value: Value) {
+		self._value = value
+	}
+
+	@discardableResult
+	func withValue<R>(_ action: (Value) -> R) -> R {
+		lock.lock()
+		defer { lock.unlock() }
+		return action(_value)
+	}
+
+	@discardableResult
+	func modify<R>(_ action: (inout Value) -> R) -> R {
+		lock.lock()
+		defer { lock.unlock() }
+		return action(&_value)
+	}
+
+	@discardableResult
+	func swap(_ newValue: Value) -> Value {
+		modify { (value: inout Value) in
+			let oldValue = value
+			value = newValue
+			return oldValue
+		}
 	}
 }
 

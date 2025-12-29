@@ -85,7 +85,7 @@ extension Defaults {
 	}
 
 	private static var preventPropagationThreadDictionaryKey: String {
-		"\(type(of: Observation.self))_threadUpdatingValuesFlag"
+		"\(type(of: (any Observation).self))_threadUpdatingValuesFlag"
 	}
 
 	/**
@@ -119,103 +119,50 @@ extension Defaults {
 		Thread.current.threadDictionary[key] = false
 	}
 
-	final class UserDefaultsKeyObservation: NSObject, Observation {
-		typealias Callback = (BaseChange) -> Void
+	final class SuiteKeyPair: Hashable {
+		weak var suite: UserDefaults?
+		let key: String
 
-		private weak var object: UserDefaults?
-		private let key: String
-		private let callback: Callback
-		private var isObserving = false
-
-		init(object: UserDefaults, key: String, callback: @escaping Callback) {
-			self.object = object
+		init(suite: UserDefaults, key: String) {
+			self.suite = suite
 			self.key = key
-			self.callback = callback
 		}
 
-		deinit {
-			invalidate()
+		func hash(into hasher: inout Hasher) {
+			hasher.combine(key)
+			hasher.combine(suite)
 		}
 
-		func start(options: ObservationOptions) {
-			object?.addObserver(self, forKeyPath: key, options: options.toNSKeyValueObservingOptions, context: nil)
-			isObserving = true
-		}
-
-		func invalidate() {
-			if isObserving {
-				object?.removeObserver(self, forKeyPath: key, context: nil)
-				isObserving = false
-			}
-
-			object = nil
-			lifetimeAssociation?.cancel()
-		}
-
-		private var lifetimeAssociation: LifetimeAssociation?
-
-		func tieToLifetime(of weaklyHeldObject: AnyObject) -> Self {
-			// swiftlint:disable:next trailing_closure
-			lifetimeAssociation = LifetimeAssociation(of: self, with: weaklyHeldObject, deinitHandler: { [weak self] in
-				self?.invalidate()
-			})
-
-			return self
-		}
-
-		func removeLifetimeTie() {
-			lifetimeAssociation?.cancel()
-		}
-
-		// swiftlint:disable:next block_based_kvo
-		override func observeValue(
-			forKeyPath keyPath: String?,
-			of object: Any?,
-			change: [NSKeyValueChangeKey: Any]?, // swiftlint:disable:this discouraged_optional_collection
-			context: UnsafeMutableRawPointer?
-		) {
-			guard let selfObject = self.object else {
-				invalidate()
-				return
-			}
-
-			guard
-				selfObject == object as? NSObject,
-				let change
-			else {
-				return
-			}
-
-			let key = preventPropagationThreadDictionaryKey
-			let updatingValuesFlag = (Thread.current.threadDictionary[key] as? Bool) ?? false
-			guard !updatingValuesFlag else {
-				return
-			}
-			callback(BaseChange(change: change))
+		static func == (lhs: SuiteKeyPair, rhs: SuiteKeyPair) -> Bool {
+			lhs.key == rhs.key
+				&& lhs.suite == rhs.suite
 		}
 	}
 
-	private final class CompositeUserDefaultsKeyObservation: NSObject, Observation {
-		private static var observationContext = 0
+	/**
+	Standard observation for `Defaults`.
+	The only class which handle the low level observation.
+	*/
+	final class DefaultsObservation: NSObject {
+		typealias Callback = (SuiteKeyPair, BaseChange) -> Void
 
-		private final class SuiteKeyPair {
-			weak var suite: UserDefaults?
-			let key: String
+		static var observationContext = 0
+		private weak var suite: UserDefaults?
+		private let name: String
+		private let callback: Callback
+		private var isObserving = false
+		private let lock: Lock = .make()
 
-			init(suite: UserDefaults, key: String) {
-				self.suite = suite
-				self.key = key
-			}
+		init(object: UserDefaults, key: String, _ callback: @escaping Callback) {
+			self.suite = object
+			self.name = key
+			self.callback = callback
 		}
 
-		private var observables: [SuiteKeyPair]
-		private var lifetimeAssociation: LifetimeAssociation?
-		private let callback: UserDefaultsKeyObservation.Callback
-
-		init(observables: [(suite: UserDefaults, key: String)], callback: @escaping UserDefaultsKeyObservation.Callback) {
-			self.observables = observables.map { SuiteKeyPair(suite: $0.suite, key: $0.key) }
+		init(key: Defaults._AnyKey, _ callback: @escaping Callback) {
+			self.suite = key.suite
+			self.name = key.name
 			self.callback = callback
-			super.init()
 		}
 
 		deinit {
@@ -223,36 +170,24 @@ extension Defaults {
 		}
 
 		func start(options: ObservationOptions) {
-			for observable in observables {
-				observable.suite?.addObserver(
-					self,
-					forKeyPath: observable.key,
-					options: options.toNSKeyValueObservingOptions,
-					context: &Self.observationContext
-				)
+			lock.with {
+				guard !isObserving else {
+					return
+				}
+				suite?.addObserver(self, forKeyPath: name, options: options.toNSKeyValueObservingOptions, context: &Self.observationContext)
+				isObserving = true
 			}
 		}
 
 		func invalidate() {
-			for observable in observables {
-				observable.suite?.removeObserver(self, forKeyPath: observable.key, context: &Self.observationContext)
-				observable.suite = nil
+			lock.with {
+				guard isObserving else {
+					return
+				}
+				suite?.removeObserver(self, forKeyPath: name)
+				isObserving = false
+				suite = nil
 			}
-
-			lifetimeAssociation?.cancel()
-		}
-
-		func tieToLifetime(of weaklyHeldObject: AnyObject) -> Self {
-			// swiftlint:disable:next trailing_closure
-			lifetimeAssociation = LifetimeAssociation(of: self, with: weaklyHeldObject, deinitHandler: { [weak self] in
-				self?.invalidate()
-			})
-
-			return self
-		}
-
-		func removeLifetimeTie() {
-			lifetimeAssociation?.cancel()
 		}
 
 		// swiftlint:disable:next block_based_kvo
@@ -269,8 +204,13 @@ extension Defaults {
 				return
 			}
 
+			guard let selfSuite = suite else {
+				invalidate()
+				return
+			}
+
 			guard
-				object is UserDefaults,
+				selfSuite == (object as? UserDefaults),
 				let change
 			else {
 				return
@@ -278,11 +218,117 @@ extension Defaults {
 
 			let key = preventPropagationThreadDictionaryKey
 			let updatingValuesFlag = (Thread.current.threadDictionary[key] as? Bool) ?? false
-			if updatingValuesFlag {
+			guard !updatingValuesFlag else {
 				return
 			}
 
-			callback(BaseChange(change: change))
+			callback(SuiteKeyPair(suite: selfSuite, key: name), BaseChange(change: change))
+		}
+	}
+
+	/**
+	Observation that wraps `DefaultsObservation` and adds a lifetime association.
+	*/
+	final class DefaultsObservationWithLifeTime: Observation {
+		private var observation: DefaultsObservation
+		private var lifetimeAssociation: LifetimeAssociation?
+
+		init(object: UserDefaults, key: String, _ callback: @escaping DefaultsObservation.Callback) {
+			self.observation = .init(object: object, key: key, callback)
+		}
+
+		init(key: Defaults._AnyKey, _ callback: @escaping DefaultsObservation.Callback) {
+			self.observation = .init(key: key, callback)
+		}
+
+		deinit {
+			invalidate()
+		}
+
+		func start(options: ObservationOptions) {
+			observation.start(options: options)
+		}
+
+		func invalidate() {
+			observation.invalidate()
+			lifetimeAssociation?.cancel()
+		}
+
+		@discardableResult
+		func tieToLifetime(of weaklyHeldObject: AnyObject) -> Self {
+			// swiftlint:disable:next trailing_closure
+			lifetimeAssociation = LifetimeAssociation(of: self, with: weaklyHeldObject, deinitHandler: { [weak self] in
+				self?.invalidate()
+			})
+
+			return self
+		}
+
+		func removeLifetimeTie() {
+			lifetimeAssociation?.cancel()
+		}
+	}
+
+	/**
+	Observation that manages multiple `DefaultsObservation`.
+	Can add or remove the observed key dynamically.
+	*/
+	final class CompositeDefaultsObservation: Observation {
+		private var observations: Set<DefaultsObservation> = []
+		private let callback: DefaultsObservation.Callback
+		private var lifetimeAssociation: LifetimeAssociation?
+
+		init(_ callback: @escaping DefaultsObservation.Callback) {
+			self.callback = callback
+		}
+
+		deinit {
+			invalidate()
+		}
+
+		func start(options: ObservationOptions) {
+			for observation in observations {
+				observation.start(options: options)
+			}
+		}
+
+		func invalidate() {
+			for observation in observations {
+				observation.invalidate()
+			}
+
+			lifetimeAssociation?.cancel()
+		}
+
+		func add(key: Defaults._AnyKey, options: ObservationOptions = []) {
+			let (isInserted, observation) = observations.insert(DefaultsObservation(key: key, callback))
+			guard isInserted else {
+				return
+			}
+
+			observation.start(options: options)
+		}
+
+		func remove(key: Defaults._AnyKey) {
+			guard let observation = observations.remove(DefaultsObservation(key: key, callback)) else {
+				return
+			}
+
+			observation.invalidate()
+		}
+
+		@discardableResult
+		func tieToLifetime(of weaklyHeldObject: AnyObject) -> Self {
+			// swiftlint:disable:next trailing_closure
+			lifetimeAssociation = LifetimeAssociation(of: self, with: weaklyHeldObject, deinitHandler: { [weak self] in
+				self?.invalidate()
+			})
+
+			return self
+		}
+
+		func removeLifetimeTie() {
+			lifetimeAssociation?.cancel()
 		}
 	}
 
@@ -300,14 +346,14 @@ extension Defaults {
 	}
 	```
 
-	- Warning: This method exists for backwards compatibility and will be deprecated sometime in the future. Use ``Defaults/updates(_:initial:)-9eh8`` instead.
+	- Warning: This method exists for backwards compatibility and will be deprecated sometime in the future. Use ``Defaults/updates(_:initial:)-88orv`` instead.
 	*/
 	public static func observe<Value: Serializable>(
 		_ key: Key<Value>,
 		options: ObservationOptions = [.initial],
 		handler: @escaping (KeyChange<Value>) -> Void
-	) -> Observation {
-		let observation = UserDefaultsKeyObservation(object: key.suite, key: key.name) { change in
+	) -> some Observation {
+		let observation = DefaultsObservationWithLifeTime(key: key) { _, change in
 			handler(
 				KeyChange(change: change, defaultValue: key.defaultValue)
 			)
@@ -315,7 +361,6 @@ extension Defaults {
 		observation.start(options: options)
 		return observation
 	}
-
 
 	/**
 	Observe multiple keys of any type, but without any information about the changes.
@@ -331,19 +376,21 @@ extension Defaults {
 	}
 	```
 
-	- Warning: This method exists for backwards compatibility and will be deprecated sometime in the future. Use ``Defaults/updates(_:initial:)-9eh8`` instead.
+	- Warning: This method exists for backwards compatibility and will be deprecated sometime in the future. Use ``Defaults/updates(_:initial:)-88orv`` instead.
 	*/
 	public static func observe(
 		keys: _AnyKey...,
 		options: ObservationOptions = [.initial],
 		handler: @escaping () -> Void
-	) -> Observation {
-		let pairs = keys.map {
-			(suite: $0.suite, key: $0.name)
-		}
-		let compositeObservation = CompositeUserDefaultsKeyObservation(observables: pairs) { _ in
+	) -> some Observation {
+		let compositeObservation = CompositeDefaultsObservation { _, _ in
 			handler()
 		}
+
+		for key in keys {
+			compositeObservation.add(key: key)
+		}
+
 		compositeObservation.start(options: options)
 
 		return compositeObservation

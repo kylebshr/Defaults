@@ -67,6 +67,8 @@ extension Defaults {
 			suite.removeObject(forKey: name)
 		}
 	}
+
+	public typealias Keys = _AnyKey
 }
 
 extension Defaults {
@@ -85,9 +87,9 @@ extension Defaults {
 	}
 	```
 
-	- Warning: The `UserDefaults` name must be ASCII, not start with `@`, and cannot contain a dot (`.`).
+	- Important: The `UserDefaults` name must be ASCII, not start with `@`, and cannot contain a dot (`.`).
 	*/
-	public final class Key<Value: Serializable>: _AnyKey {
+	public final class Key<Value: Serializable>: _AnyKey, @unchecked Sendable {
 		/**
 		It will be executed in these situations:
 
@@ -103,6 +105,9 @@ extension Defaults {
 		Create a key.
 
 		- Parameter name: The name must be ASCII, not start with `@`, and cannot contain a dot (`.`).
+		- Parameter defaultValue: The default value.
+		- Parameter suite: The `UserDefaults` suite to store the value in.
+		- Parameter iCloud: Automatically synchronize the value with ``Defaults/iCloud``.
 
 		The `default` parameter should not be used if the `Value` type is an optional.
 		*/
@@ -110,13 +115,20 @@ extension Defaults {
 		public init(
 			_ name: String,
 			default defaultValue: Value,
-			suite: UserDefaults = .standard
+			suite: UserDefaults = .standard,
+			iCloud: Bool = false
 		) {
+			defer {
+				if iCloud {
+					Defaults.iCloud.add(self)
+				}
+			}
+
 			self.defaultValueGetter = { defaultValue }
 
 			super.init(name: name, suite: suite)
 
-			if (defaultValue as? _DefaultsOptionalProtocol)?._defaults_isNil == true {
+			if (defaultValue as? (any _DefaultsOptionalProtocol))?._defaults_isNil == true {
 				return
 			}
 
@@ -140,6 +152,9 @@ extension Defaults {
 		```
 
 		- Parameter name: The name must be ASCII, not start with `@`, and cannot contain a dot (`.`).
+		- Parameter suite: The `UserDefaults` suite to store the value in.
+		- Parameter iCloud: Automatically synchronize the value with ``Defaults/iCloud``.
+		- Parameter defaultValueGetter: The dynamic default value.
 
 		- Note: This initializer will not set the default value in the actual `UserDefaults`. This should not matter much though. It's only really useful if you use legacy KVO bindings.
 		*/
@@ -147,11 +162,16 @@ extension Defaults {
 		public init(
 			_ name: String,
 			suite: UserDefaults = .standard,
+			iCloud: Bool = false,
 			default defaultValueGetter: @escaping () -> Value
 		) {
 			self.defaultValueGetter = defaultValueGetter
 
 			super.init(name: name, suite: suite)
+
+			if iCloud {
+				Defaults.iCloud.add(self)
+			}
 		}
 	}
 }
@@ -162,14 +182,46 @@ extension Defaults.Key {
 	Create a key with an optional value.
 
 	- Parameter name: The name must be ASCII, not start with `@`, and cannot contain a dot (`.`).
+	- Parameter suite: The `UserDefaults` suite to store the value in.
+	- Parameter iCloud: Automatically synchronize the value with ``Defaults/iCloud``.
 	*/
-	@_transparent
 	public convenience init<T>(
 		_ name: String,
-		suite: UserDefaults = .standard
+		suite: UserDefaults = .standard,
+		iCloud: Bool = false
 	) where Value == T? {
-		self.init(name, default: nil, suite: suite)
+		self.init(
+			name,
+			default: nil,
+			suite: suite,
+			iCloud: iCloud
+		)
 	}
+
+	/**
+	Check whether the stored value is the default value.
+
+	- Note: This is only for internal use because it would not work for non-equatable values.
+	*/
+	var _isDefaultValue: Bool {
+		let defaultValue = defaultValue
+		let value = suite[self]
+		guard
+			let defaultValue = defaultValue as? any Equatable,
+			let value = value as? any Equatable
+		else {
+			return false
+		}
+
+		return defaultValue.isEqual(value)
+	}
+}
+
+extension Defaults.Key where Value: Equatable {
+	/**
+	Indicates whether the value is the same as the default value.
+	*/
+	public var isDefaultValue: Bool { suite[self] == defaultValue }
 }
 
 extension Defaults {
@@ -198,115 +250,10 @@ extension Defaults._AnyKey: Hashable {
 }
 
 extension Defaults {
-	public typealias Keys = _AnyKey
-
-	/**
-	Types that conform to this protocol can be used with `Defaults`.
-
-	The type should have a static variable `bridge` which should reference an instance of a type that conforms to `Defaults.Bridge`.
-
-	```swift
-	struct User {
-		username: String
-		password: String
-	}
-
-	extension User: Defaults.Serializable {
-		static let bridge = UserBridge()
-	}
-	```
-	*/
-	public typealias Serializable = _DefaultsSerializable
-
-	public typealias CollectionSerializable = _DefaultsCollectionSerializable
-	public typealias SetAlgebraSerializable = _DefaultsSetAlgebraSerializable
-
-	/**
-	Ambiguous bridge selector protocol that lets you select your preferred bridge when there are multiple possibilities.
-
-	```swift
-	enum Interval: Int, Codable, Defaults.Serializable, Defaults.PreferRawRepresentable {
-		case tenMinutes = 10
-		case halfHour = 30
-		case oneHour = 60
-	}
-	```
-
-	By default, if an `enum` conforms to `Codable` and `Defaults.Serializable`, it will use the `CodableBridge`, but by conforming to `Defaults.PreferRawRepresentable`, we can switch the bridge back to `RawRepresentableBridge`.
-	*/
-	public typealias PreferRawRepresentable = _DefaultsPreferRawRepresentable
-
-	/**
-	Ambiguous bridge selector protocol that lets you select your preferred bridge when there are multiple possibilities.
-	*/
-	public typealias PreferNSSecureCoding = _DefaultsPreferNSSecureCoding
-
-	/**
-	A `Bridge` is responsible for serialization and deserialization.
-
-	It has two associated types `Value` and `Serializable`.
-
-	- `Value`: The type you want to use.
-	- `Serializable`: The type stored in `UserDefaults`.
-	- `serialize`: Executed before storing to the `UserDefaults` .
-	- `deserialize`: Executed after retrieving its value from the `UserDefaults`.
-
-	```swift
-	struct User {
-		username: String
-		password: String
-	}
-
-	extension User {
-		static let bridge = UserBridge()
-	}
-
-	struct UserBridge: Defaults.Bridge {
-		typealias Value = User
-		typealias Serializable = [String: String]
-
-		func serialize(_ value: Value?) -> Serializable? {
-			guard let value else {
-				return nil
-			}
-
-			return [
-				"username": value.username,
-				"password": value.password
-			]
-		}
-
-		func deserialize(_ object: Serializable?) -> Value? {
-			guard
-				let object,
-				let username = object["username"],
-				let password = object["password"]
-			else {
-				return nil
-			}
-
-			return User(
-				username: username,
-				password: password
-			)
-		}
-	}
-	```
-	*/
-	public typealias Bridge = _DefaultsBridge
-
-	public typealias RangeSerializable = _DefaultsRange & _DefaultsSerializable
-
-	/**
-	Convenience protocol for `Codable`.
-	*/
-	typealias CodableBridge = _DefaultsCodableBridge
-}
-
-extension Defaults {
 	/**
 	Observe updates to a stored value.
 
+	- Parameter key: The key to observe updates from.
 	- Parameter initial: Trigger an initial event on creation. This can be useful for setting default values on controls.
 
 	```swift
@@ -326,9 +273,9 @@ extension Defaults {
 	public static func updates<Value: Serializable>(
 		_ key: Key<Value>,
 		initial: Bool = true
-	) -> AsyncStream<Value> { // TODO: Make this `some AsyncSequence<Value>` when Swift 6 is out.
-		.init { continuation in
-			let observation = UserDefaultsKeyObservation(object: key.suite, key: key.name) { change in
+	) -> AsyncStream<Value> { // TODO: Make this `some AsyncSequence<Value>` when targeting macOS 15.
+		AsyncStream { continuation in
+			let observation = DefaultsObservation(object: key.suite, key: key.name) { _, change in
 				// TODO: Use the `.deserialize` method directly.
 				let value = KeyChange(change: change, defaultValue: key.defaultValue).newValue
 				continuation.yield(value)
@@ -337,15 +284,71 @@ extension Defaults {
 			observation.start(options: initial ? [.initial] : [])
 
 			continuation.onTermination = { _ in
-				observation.invalidate()
+				// `invalidate()` should be thread-safe, but it is not in practice.
+				Task { @MainActor in
+					observation.invalidate()
+				}
 			}
 		}
 	}
 
-	// TODO: Make this include a tuple with the values when Swift supports variadic generics. I can then simply use `merge()` with the first `updates()` method.
 	/**
 	Observe updates to multiple stored values.
 
+	- Parameter keys: The keys to observe updates from.
+	- Parameter initial: Trigger an initial event on creation. This can be useful for setting default values on controls.
+
+	```swift
+	Task {
+		for await (foo, bar) in Defaults.updates(.foo, .bar) {
+			print("Values changed:", foo, bar)
+		}
+	}
+	```
+	*/
+	@_disfavoredOverload
+	public static func updates<each Value: Serializable>(
+		_ keys: repeat Key<each Value>,
+		initial: Bool = true
+	) -> AsyncStream<(repeat each Value)> {
+		AsyncStream { continuation in
+			func getCurrentValues() -> (repeat each Value) {
+				(repeat self[each keys])
+			}
+
+			var observations = [DefaultsObservation]()
+
+			if initial {
+				continuation.yield(getCurrentValues())
+			}
+
+			for key in repeat (each keys) {
+				let observation = DefaultsObservation(object: key.suite, key: key.name) { _, _  in
+					continuation.yield(getCurrentValues())
+				}
+
+				observation.start(options: [])
+				observations.append(observation)
+			}
+
+			let immutableObservations = observations
+
+			continuation.onTermination = { _ in
+				// `invalidate()` should be thread-safe, but it is not in practice.
+				Task { @MainActor in
+					for observation in immutableObservations {
+						observation.invalidate()
+					}
+				}
+			}
+		}
+	}
+
+	// We still keep this as it can be useful to pass a dynamic array of keys.
+	/**
+	Observe updates to multiple stored values without receiving the values.
+
+	- Parameter keys: The keys to observe updates from.
 	- Parameter initial: Trigger an initial event on creation. This can be useful for setting default values on controls.
 
 	```swift
@@ -356,15 +359,15 @@ extension Defaults {
 	}
 	```
 
-	- Note: This does not include which of the values changed. Use ``Defaults/updates(_:initial:)-9eh8`` if you need that. You could use [`merge`](https://github.com/apple/swift-async-algorithms/blob/main/Sources/AsyncAlgorithms/AsyncAlgorithms.docc/Guides/Merge.md) to merge them into a single sequence.
+	- Note: This does not include which of the values changed. Use ``Defaults/updates(_:initial:)-l03o`` if you need that.
 	*/
 	public static func updates(
 		_ keys: [_AnyKey],
 		initial: Bool = true
-	) -> AsyncStream<Void> { // TODO: Make this `some AsyncSequence<Value>` when Swift 6 is out.
-		.init { continuation in
+	) -> AsyncStream<Void> { // TODO: Make this `some AsyncSequence<Void>` when targeting macOS 15.
+		AsyncStream { continuation in
 			let observations = keys.indexed().map { index, key in
-				let observation = UserDefaultsKeyObservation(object: key.suite, key: key.name) { _ in
+				let observation = DefaultsObservation(object: key.suite, key: key.name) { _, _ in
 					continuation.yield()
 				}
 
@@ -375,8 +378,11 @@ extension Defaults {
 			}
 
 			continuation.onTermination = { _ in
-				for observation in observations {
-					observation.invalidate()
+				// `invalidate()` should be thread-safe, but it is not in practice.
+				Task { @MainActor in
+					for observation in observations {
+						observation.invalidate()
+					}
 				}
 			}
 		}
